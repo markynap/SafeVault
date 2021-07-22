@@ -1206,6 +1206,10 @@ contract SafemoonVault is IERC20, Context, Ownable {
         marketingFeeReceiver = nAddress;
     }
 
+    function setSafemoonAddress(address safemoonAddress) public onlyOwner {
+        SM = IERC20(safemoonAddress);
+    }
+
     event AutoLiquify(uint256 amountBNB, uint256 amountBOG);
     event VaultBuyBackAndBurn(uint256 amountBNB);
 }
