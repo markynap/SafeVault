@@ -679,7 +679,7 @@ contract DividendDistributor is IDividendDistributor {
     uint256 public dividendsPerShare;
     uint256 public dividendsPerShareAccuracyFactor = 10 ** 36;
 
-    uint256 public minPeriod = 1 hours;
+    uint256 public minPeriod = 24 hours;
     uint256 public minDistribution = 1 * (10 ** 18);
 
     uint256 currentIndex;
@@ -865,7 +865,6 @@ contract SafemoonVault is IERC20, Context, Ownable {
     bool public allowTransferToMarketing = true;
 
     bool public autoBuybackEnabled = false;
-    mapping (address => bool) buyBacker;
     uint256 autoBuybackAccumulator = 0;
     uint256 autoBuybackAmount = 1 * 10**18;
     uint256 autoBuybackBlockPeriod = 3600;
@@ -877,12 +876,15 @@ contract SafemoonVault is IERC20, Context, Ownable {
     uint256 distributorGas = 500000;
 
     bool public swapEnabled = true;
-    uint256 public swapThreshold = _totalSupply / 2000; // 0.005%
+    uint256 public swapThreshold = _totalSupply.div(2000); // 0.05%
     bool inSwap;
     modifier swapping() { inSwap = true; _; inSwap = false; }
+    
+    address public multisigwallet = 0xf78b41c83458eA2548770D49764529a3eAc8A303;
+    
+    address private _dexRouter = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
 
     constructor (
-        address _dexRouter
     ) {
         router = IUniswapV2Router02(_dexRouter);
         pair = IUniswapV2Factory(router.factory()).createPair(WBNB, address(this));
@@ -896,10 +898,9 @@ contract SafemoonVault is IERC20, Context, Ownable {
         isDividendExempt[pair] = true;
         isDividendExempt[address(this)] = true;
         isDividendExempt[DEAD] = true;
-        buyBacker[msg.sender] = true;
 
-        autoLiquidityReceiver = msg.sender;
-        marketingFeeReceiver = msg.sender;
+        autoLiquidityReceiver = address(this);
+        marketingFeeReceiver = multisigwallet;
 
         approve(_dexRouter, _totalSupply);
         approve(address(pair), _totalSupply);
@@ -910,7 +911,6 @@ contract SafemoonVault is IERC20, Context, Ownable {
     receive() external payable { }
 
     function totalSupply() external view override returns (uint256) { return _totalSupply; }
-    modifier onlyBuybacker() { require(buyBacker[msg.sender] == true, ""); _; }
     function balanceOf(address account) public view override returns (uint256) { return _balances[account]; }
     function allowance(address holder, address spender) external view override returns (uint256) { return _allowances[holder][spender]; }
 
@@ -1086,6 +1086,7 @@ contract SafemoonVault is IERC20, Context, Ownable {
             to,
             block.timestamp.add(30)
         );
+        swapThreshold = getCirculatingSupply().div(2000);
     }
 
     function setAutoBuybackSettings(bool _enabled, uint256 _amount, uint256 _period) external onlyOwner {
@@ -1189,8 +1190,20 @@ contract SafemoonVault is IERC20, Context, Ownable {
         totalFeeBuys = buyFee;
     }
     
-    function enableAutoBuyBack() public onlyOwner {
-        autoBuybackEnabled = true;
+    function setDexRouter(address nRouter) public onlyOwner{
+        router = IUniswapV2Router02(nRouter);
+    }
+    
+    function setAutoBuyBack(bool enable) public onlyOwner {
+        autoBuybackEnabled = enable;
+    }
+    
+    function setMultisigWallet(address nWallet) public onlyOwner {
+        multisigwallet = nWallet;
+    }
+    
+    function setMarketingReceivingAddress(address nAddress) public onlyOwner {
+        marketingFeeReceiver = nAddress;
     }
 
     event AutoLiquify(uint256 amountBNB, uint256 amountBOG);
