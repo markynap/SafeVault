@@ -854,9 +854,8 @@ contract DividendDistributor is IDividendDistributor {
 
 /** 
  * Contract: SafemoonVault 
- * Created by: AnondeV
  * 
- *  This contract is forked from SafeEarn with some small tweaks / improvements
+ *  This contract is forked from SafeEarn with a few tweaks / improvements
  *  This Contract Awards Safemoon Daily to holders, weighted by how much you hold
  *  Safemoon Burn Wallet Gains 2% of the Distribution (contributing to asynchronous burning)
  *  
