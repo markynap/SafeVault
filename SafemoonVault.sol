@@ -654,7 +654,9 @@ interface IUniswapV2Router02 is IUniswapV2Router01 {
 }
 
 contract DividendDistributor is IDividendDistributor {
+    
     using SafeMath for uint256;
+    using Address for address;
 
     address _token;
 
@@ -681,7 +683,7 @@ contract DividendDistributor is IDividendDistributor {
     uint256 public dividendsPerShareAccuracyFactor = 10 ** 36;
 
     uint256 public minPeriod = 24 hours;
-    uint256 public minDistribution = 1 * (10 ** 18);
+    uint256 public minDistribution = 8 * (10 ** 14); // 800k Safemoon Minimum Distribution
     
     uint256 public swapToSafemoonThreshold = 1 * (10 ** 18);
 
@@ -855,9 +857,10 @@ contract DividendDistributor is IDividendDistributor {
 /** 
  * Contract: SafemoonVault 
  * 
- *  This contract is forked from SafeEarn with a few tweaks / improvements
+ *  This contract is forked from SafeEarn with some small tweaks / improvements to gas
  *  This Contract Awards Safemoon Daily to holders, weighted by how much you hold
  *  Safemoon Burn Wallet Gains 2% of the Distribution (contributing to asynchronous burning)
+ *  This is due to the fact that we sent 2% of the supply to Safemoon's Burn Wallet on Launch
  *  
  *  Buy Fees:  5%
  *  Sell Fees: 30%
@@ -869,90 +872,94 @@ contract DividendDistributor is IDividendDistributor {
  *  1% Marketing
  */
 contract SafeVault is IERC20, Context, Ownable {
+    
     using SafeMath for uint256;
-
+    using SafeMath for uint8;
+    using Address for address;
+    // wrapped bnb address for swapping
     address public WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    // our burn wallet address - separate from Safemoon's
     address DEAD = 0x000000000000000000000000000000000000dEaD;
     address ZERO = 0x0000000000000000000000000000000000000000;
-
+    // token data
     string constant _name = "SafeVault";
     string constant _symbol = "VAULT";
     uint8 constant _decimals = 9;
-
+    // 1 Trillion Max Supply
     uint256 _totalSupply = 1 * 10**12 * (10 ** _decimals);
-    uint256 public _maxTxAmount = _totalSupply.div(200); // 0.5%
-
-    mapping (address => uint256) _balances;
+    uint256 public _maxTxAmount = _totalSupply.div(200); // 0.5% or 5 Billion
+    // balances
+    mapping (address => uint256) _balances; 
     mapping (address => mapping (address => uint256)) _allowances;
-
+    // exemptions
     mapping (address => bool) isFeeExempt;
     mapping (address => bool) isTxLimitExempt;
     mapping (address => bool) isDividendExempt;
-
+    // fees
     uint256 liquidityFee = 300;
     uint256 buybackFee = 600;
     uint256 reflectionFee = 2000;
     uint256 marketingFee = 100;
     uint256 totalFeeSells = 3000;
-
+    // total fees
     uint256 totalFeeBuys = 500;
     uint256 feeDenominator = 10000;
-    
+    // receiving addresses
     address public autoLiquidityReceiver;
     address public marketingFeeReceiver;
-
-    uint256 targetLiquidity = 20;
+    // target liquidity is 10%
+    uint256 targetLiquidity = 10;
     uint256 targetLiquidityDenominator = 100;
-
+    
     IUniswapV2Router02 public router;
     address public pair;
-
-    uint256 public launchedAt;
+    // when contract was launched
+    uint256 public launchedAt = 0;
     uint256 public launchedAtTimestamp;
-    
-    bool public allowTransferToMarketing = true;
-
+    // buy back 
     bool public autoBuybackEnabled = false;
     uint256 autoBuybackAccumulator = 0;
     uint256 autoBuybackAmount = 1 * 10**18;
     uint256 autoBuybackBlockPeriod = 3600; // 3 hours
     uint256 autoBuybackBlockLast = block.number;
-
+    bool public allowTransferToMarketing = true;
+    // gas for distributor
     DividendDistributor distributor;
-
     uint256 distributorGas = 500000;
-
+    // in charge of swapping
     bool public swapEnabled = true;
     uint256 public swapThreshold = _totalSupply.div(1250); // 0.08% or 800 Million to start
     bool public canChangeSwapThreshold = true;
     uint256 public swapThresholdPercentOfCirculatingSupply = 1750;
     bool inSwap;
     modifier swapping() { inSwap = true; _; inSwap = false; }
-    
+    // Marketing Wallet and MultiSignature Development Wallet
     address public multisigwallet = 0x9A34349FD7b0266fc500DC98FEc1b13F2eABbb51;
-    
+    // Uniswap Router V2
     address private _dexRouter = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
-    
-    uint256 numCatches = 0;
-
+    // false if we should disable auto liquidity pairing for any reason
+    bool public shouldPairLiquidity = true;
+    // initialize some stuff
     constructor (
     ) {
+        // Pancakeswap V2 Router
         router = IUniswapV2Router02(_dexRouter);
+        // Liquidity Pool Address for BNB -> Vault
         pair = IUniswapV2Factory(router.factory()).createPair(WBNB, address(this));
         _allowances[address(this)][address(router)] = _totalSupply;
         WBNB = router.WETH();
         distributor = new DividendDistributor(_dexRouter);
         // exempt deployer from fees
         isFeeExempt[msg.sender] = true;
-        
+        // exempt deployer from TX limit
         isTxLimitExempt[msg.sender] = true;
         isTxLimitExempt[multisigwallet] = true;
-        
+        // exempt this contract, the LP, and OUR burn wallet from receiving dividends
         isDividendExempt[pair] = true;
         isDividendExempt[address(this)] = true;
         isDividendExempt[DEAD] = true;
-
-        autoLiquidityReceiver = address(this);
+        // send LP tokens to the burn wallet
+        autoLiquidityReceiver = DEAD;
         marketingFeeReceiver = multisigwallet;
 
         approve(_dexRouter, _totalSupply);
@@ -976,11 +983,11 @@ contract SafeVault is IERC20, Context, Ownable {
     function approveMax(address spender) external returns (bool) {
         return approve(spender, _totalSupply);
     }
-
+    /** Transfer Function */
     function transfer(address recipient, uint256 amount) external override returns (bool) {
         return _transferFrom(msg.sender, recipient, amount);
     }
-
+    /** Transfer Function */
     function transferFrom(address sender, address recipient, uint256 amount) external override returns (bool) {
         if(_allowances[sender][msg.sender] != _totalSupply){
             _allowances[sender][msg.sender] = _allowances[sender][msg.sender].sub(amount, "Insufficient Allowance");
@@ -988,13 +995,17 @@ contract SafeVault is IERC20, Context, Ownable {
 
         return _transferFrom(sender, recipient, amount);
     }
-
+    /** Internal Transfer */
     function _transferFrom(address sender, address recipient, uint256 amount) internal returns (bool) {
+        // make standard checks
+        require(recipient != address(0), "BEP20: transfer to the zero address");
+        require(amount > 0, "Transfer amount must be greater than zero");
+        // if we're in swap perform a basic transfer
         if(inSwap){ return _basicTransfer(sender, recipient, amount); }
-
+        // check if we have reached the transaction limit
         checkTxLimit(sender, amount);
         uint256 amountReceived;
-        
+        // limit gas consumption by splitting up operations
         if(shouldSwapBack()) { 
             swapBack();
             amountReceived = handleTransferBody(sender, recipient, amount);
@@ -1003,13 +1014,14 @@ contract SafeVault is IERC20, Context, Ownable {
             amountReceived = handleTransferBody(sender, recipient, amount);
         } else {
             amountReceived = handleTransferBody(sender, recipient, amount);
-            try distributor.process(distributorGas) {} catch {numCatches++;}
+            uint256 gasToUse = distributorGas > gasleft() ? gasleft().mul(2).div(3) : distributorGas;
+            try distributor.process(gasToUse) {} catch {}
         }
         
         emit Transfer(sender, recipient, amountReceived);
         return true;
     }
-    
+    /** Takes Associated Fees and sets holders' new Share for the Safemoon Distributor */
     function handleTransferBody(address sender, address recipient, uint256 amount) internal returns (uint256) {
         _balances[sender] = _balances[sender].sub(amount, "Insufficient Balance");
 
@@ -1017,12 +1029,11 @@ contract SafeVault is IERC20, Context, Ownable {
 
         _balances[recipient] = _balances[recipient].add(amountReceived);
 
-        if(!isDividendExempt[sender]){ try distributor.setShare(sender, _balances[sender]) {} catch {numCatches++;} }
-        if(!isDividendExempt[recipient]){ try distributor.setShare(recipient, _balances[recipient]) {} catch {numCatches++;} }
+        if(!isDividendExempt[sender]){ try distributor.setShare(sender, _balances[sender]) {} catch {} }
 
         return amountReceived;
     }
-
+    /** Basic Transfer with no swaps for BNB -> Vault or Vault -> BNB */
     function _basicTransfer(address sender, address recipient, uint256 amount) internal returns (bool) {
         _balances[sender] = _balances[sender].sub(amount, "Insufficient Balance");
         
@@ -1036,25 +1047,25 @@ contract SafeVault is IERC20, Context, Ownable {
             _balances[recipient] = _balances[recipient].add(amount);
         }
         
-        if(!isDividendExempt[sender]){ try distributor.setShare(sender, _balances[sender]) {} catch {numCatches++;} }
-        if(!isDividendExempt[recipient]){ try distributor.setShare(recipient, _balances[recipient]) {} catch {numCatches++;} }
+        if(!isDividendExempt[sender]){ try distributor.setShare(sender, _balances[sender]) {} catch {} }
+        if(!isDividendExempt[recipient]){ try distributor.setShare(recipient, _balances[recipient]) {} catch {} }
         return true;
     }
-    
+    /** Checks if the amount is greater than the tx limit if the sender is not limit exempt*/
     function checkTxLimit(address sender, uint256 amount) internal view {
         require(amount <= _maxTxAmount || isTxLimitExempt[sender], "TX Limit Exceeded");
     }
-
+    /** False if sender is Fee Exempt, True if not */
     function shouldTakeFee(address sender) internal view returns (bool) {
         return !isFeeExempt[sender];
     }
-
+    /** Takes Proper Fee (5% buys / transfers, 30% on sells) and stores in contract */
     function takeFee(address receiver, uint256 amount) internal returns (uint256) {
         uint256 feeAmount = amount.mul(getTotalFee(receiver == pair)).div(feeDenominator);
         _balances[address(this)] = _balances[address(this)].add(feeAmount);
         return amount.sub(feeAmount);
     }
-
+    /** True if we should swap from Vault => BNB */
     function shouldSwapBack() internal view returns (bool) {
         return msg.sender != pair
         && !inSwap
@@ -1070,8 +1081,9 @@ contract SafeVault is IERC20, Context, Ownable {
      *      add liquidity if liquidity is low
      */
     function swapBack() internal swapping {
-        // check if we need to add liquidity
-        uint256 dynamicLiquidityFee = isOverLiquified(targetLiquidity, targetLiquidityDenominator) ? 0 : liquidityFee;
+        
+        // check if we need to add liquidity 
+        uint256 dynamicLiquidityFee = (isOverLiquified(targetLiquidity, targetLiquidityDenominator) || !shouldPairLiquidity)? 0 : liquidityFee;
         uint256 amountToLiquify = swapThreshold.mul(dynamicLiquidityFee).div(totalFeeSells).div(2);
         uint256 amountToSwap = swapThreshold.sub(amountToLiquify);
         
@@ -1087,7 +1099,7 @@ contract SafeVault is IERC20, Context, Ownable {
             path,
             address(this),
             block.timestamp
-        ) {} catch{numCatches++;}
+        ) {} catch{}
         // how much BNB did we swap?
         uint256 amountBNB = address(this).balance.sub(balanceBefore);
         // how much of these are going to Reflections + Marketing?
@@ -1100,37 +1112,28 @@ contract SafeVault is IERC20, Context, Ownable {
         
         (bool success,) = payable(address(distributor)).call{value: amountBNBReflection, gas: 30000}("");
         if (success) {
-            try distributor.deposit() {} catch {numCatches++;}
+            try distributor.deposit() {} catch {}
         }
         
         if (allowTransferToMarketing) {
-            transferToMarketing(amountBNBMarketing);
+            (bool successful,) = payable(marketingFeeReceiver).call{value: amountBNBMarketing, gas: 30000}("");
+            require(successful, "Unable to send bnb to marketing");
         }
         
         // add liquidity if we need to
-        if(amountToLiquify > 0){
-            pairLiquidity(amountBNBLiquidity, amountToLiquify);
+        if(amountToLiquify > 0 && shouldPairLiquidity ){
+            try router.addLiquidityETH{value: amountBNBLiquidity}(
+                address(this),
+                amountToLiquify,
+                0,
+                0,
+                autoLiquidityReceiver,
+                block.timestamp
+        ) {} catch {}
             emit AutoLiquify(amountBNBLiquidity, amountToLiquify);
         }
     }
-    
-    function pairLiquidity(uint256 amountBNB, uint256 amountVault) internal {
-        
-        try router.addLiquidityETH{value: amountBNB}(
-            address(this),
-            amountVault,
-            0,
-            0,
-            autoLiquidityReceiver,
-            block.timestamp
-        ) {} catch {numCatches++;}
-    }
-    
-    function transferToMarketing(uint256 amountBNBMarketing) internal {
-       (bool success,) = payable(marketingFeeReceiver).call{value: amountBNBMarketing, gas: 30000}("");
-        require(success, "Unable to send bnb to marketing");
-    }
-    
+
     /** Should Vault buy/burn right now? */
     function shouldAutoBuyback() internal view returns (bool) {
         return msg.sender != pair
@@ -1139,7 +1142,7 @@ contract SafeVault is IERC20, Context, Ownable {
         && autoBuybackBlockLast + autoBuybackBlockPeriod <= block.number // After N blocks from last buyback
         && address(this).balance >= autoBuybackAmount;
     }
-    
+    /** Buy back tokens to make up for buy fee */
     function triggerAutoBuyback() internal {
         buyTokens(autoBuybackAmount, DEAD);
         autoBuybackBlockLast = block.number;
@@ -1164,53 +1167,22 @@ contract SafeVault is IERC20, Context, Ownable {
             swapThreshold = getCirculatingSupply().div(swapThresholdPercentOfCirculatingSupply);
         }
     }
-
+    /** Whether or not this contract has been launched */
     function launched() internal view returns (bool) {
         return launchedAt != 0;
     }
     
-    /** 0 process manually - 1 process with standard gas - above 1 process with custom gas limit */
+    /** 0 = process manually | 1 = process with standard gas | Above 1 = process with custom gas limit */
     function manuallyProcessDividends(uint256 distributorGasFee) public {
         if (distributorGasFee == 0) {
-            try distributor.processManually() {} catch {numCatches++;}
+            try distributor.processManually() {} catch {}
         } else if (distributorGasFee == 1) {
-            try distributor.process(distributorGas) {} catch {numCatches++;}
+            try distributor.process(distributorGas) {} catch {}
         } else {
-            try distributor.process(distributorGasFee) {} catch {numCatches++;}
+            try distributor.process(distributorGasFee) {} catch {}
         }
     }
-
-  /**
-   * Uses BNB in Contract to Purchase VAULT, pairs with remaining BNB and adds to Liquidity Pool
-   * Similar to swapAndLiquify, but the reverse - credit: SafemoonMark
-   */
-   function reverseSwapAndLiquify() public onlyOwner {
-      
-    // BNB Balance before the swap
-    uint256 initialBalance = address(this).balance;
-    // get half of the bnb available to swap
-    uint256 half = initialBalance.div(2);
-    // Vault Balance before the Swap
-    uint256 contractBalance = balanceOf(address(this));
-    // Swap 50% of the BNB in Contract for Vault Tokens
-    buyTokens(half, address(this));
-    // how much bnb was spent on the swap
-    uint256 bnbInSwap = initialBalance.sub(address(this).balance);
-    // how many Vault Tokens do we have now?
-    uint256 currentBalance = balanceOf(address(this));
-    // Get Exact Number of Vault We Swapped For
-    uint256 diff = currentBalance.sub(contractBalance);
-    
-    if (bnbInSwap > address(this).balance) {
-        bnbInSwap = address(this).balance;
-    }
-    
-    // add liquidity to Pancakeswap
-    pairLiquidity(bnbInSwap, diff);
-    
-    emit ReverseSwapAndLiquify(bnbInSwap, diff);
-   }
-
+    /** Sets Various Fees */
     function setFees(uint256 _liquidityFee, uint256 _buybackFee, uint256 _reflectionFee, uint256 _marketingFee, uint256 _feeDenominator) external onlyOwner {
         liquidityFee = _liquidityFee;
         buybackFee = _buybackFee;
@@ -1242,11 +1214,12 @@ contract SafeVault is IERC20, Context, Ownable {
         autoBuybackBlockLast = block.number;
     }
 
-    function setSwapBackSettings(bool _enabled, uint256 _amount, bool changeSwapThreshold, uint256 percentOfCirculatingSupply) external onlyOwner {
+    function setSwapBackSettings(bool _enabled, uint256 _amount, bool changeSwapThreshold, bool shouldAutomateLiquidity, uint256 percentOfCirculatingSupply) external onlyOwner {
         swapEnabled = _enabled;
         swapThreshold = _amount;
         canChangeSwapThreshold = changeSwapThreshold;
         swapThresholdPercentOfCirculatingSupply = percentOfCirculatingSupply;
+        shouldPairLiquidity = shouldAutomateLiquidity;
     }
 
     function setTargetLiquidity(uint256 _target, uint256 _denominator) external onlyOwner {
@@ -1270,7 +1243,7 @@ contract SafeVault is IERC20, Context, Ownable {
     }
 
     function setTxLimit(uint256 amount) external onlyOwner {
-        require(amount >= _totalSupply / 1000);
+        require(amount >= _totalSupply / 2500);
         _maxTxAmount = amount;
     }
 
@@ -1304,7 +1277,7 @@ contract SafeVault is IERC20, Context, Ownable {
         _dexRouter = nRouter;
         router = IUniswapV2Router02(nRouter);
     }
-    
+
     function setAutoBuyBack(bool enable) public onlyOwner {
         autoBuybackEnabled = enable;
     }
@@ -1325,29 +1298,20 @@ contract SafeVault is IERC20, Context, Ownable {
         return (address(this).balance);
     }
     
-    function getVaultQuantityInContract() public view returns(uint256) {
-        return(balanceOf(address(this)));
-    }
-    
     function getTotalFee(bool selling) public view returns (uint256) {
         if(launchedAt + 1 >= block.number){ return feeDenominator.sub(1); }
         if(selling){ return totalFeeSells; }
         return totalFeeBuys;
     }
-    
+    /** Returns the Circulating Supply of Vault ( supply not owned by Burn Wallet or Zero Address )*/
     function getCirculatingSupply() public view returns (uint256) {
         return _totalSupply.sub(balanceOf(DEAD)).sub(balanceOf(ZERO));
     }
 
-    function getLiquidityBacking(uint256 accuracy) public view returns (uint256) {
-        return accuracy.mul(balanceOf(pair).mul(2)).div(getCirculatingSupply());
-    }
-
     function isOverLiquified(uint256 target, uint256 accuracy) public view returns (bool) {
-        return getLiquidityBacking(accuracy) > target;
+        return accuracy.mul(balanceOf(pair).mul(2)).div(getCirculatingSupply()) > target;
     }
 
     event AutoLiquify(uint256 amountBNB, uint256 amountBOG);
     event VaultBuyBackAndBurn(uint256 amountBNB);
-    event ReverseSwapAndLiquify(uint256 bnbAmount, uint256 vaultAmount);
 }
