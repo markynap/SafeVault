@@ -1,9 +1,11 @@
 //SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-/** Forked from SafeEarn V2 Dividend Distributor with performance adjustments (credit woofydev) */
+/** 
+ * Forked Distributor from SafeEarn V2 with performance adjustments (credit woofydev) 
+ */
 interface IDividendDistributor {
-    function setDistributionCriteria(uint256 _minPeriod, uint256 _minDistribution) external;
+    function setDistributionCriteria(uint256 _minPeriod, uint256 _minDistribution, uint256 _bnbToSafemoonThreshold) external;
     function setShare(address shareholder, uint256 amount) external;
     function deposit() external;
     function process(uint256 gas) external;
@@ -458,9 +460,6 @@ interface IUniswapV2Factory {
     function setFeeToSetter(address) external;
 }
 
-
-// pragma solidity >=0.5.0;
-
 interface IUniswapV2Pair {
     event Approval(address indexed owner, address indexed spender, uint value);
     event Transfer(address indexed from, address indexed to, uint value);
@@ -511,8 +510,6 @@ interface IUniswapV2Pair {
 
     function initialize(address, address) external;
 }
-
-// pragma solidity >=0.6.2;
 
 interface IUniswapV2Router01 {
     function factory() external pure returns (address);
@@ -608,10 +605,6 @@ interface IUniswapV2Router01 {
     function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts);
 }
 
-
-
-// pragma solidity >=0.6.2;
-
 interface IUniswapV2Router02 is IUniswapV2Router01 {
     function removeLiquidityETHSupportingFeeOnTransferTokens(
         address token,
@@ -653,48 +646,43 @@ interface IUniswapV2Router02 is IUniswapV2Router01 {
     ) external;
 }
 
+/** Forked Distributor from SafeEarn with performance adjustments (credit woofydev) */
 contract DividendDistributor is IDividendDistributor {
     
     using SafeMath for uint256;
     using Address for address;
-
+    // SafeVault Contract
     address _token;
-
+    // Share of the Safemoon Pie
     struct Share {
         uint256 amount;
         uint256 totalExcluded;
         uint256 totalRealised;
     }
-
+    // safemoon contract address
     address SM = 0x8076C74C5e3F5852037F31Ff0093Eeb8c8ADd8D3;
+    // bnb address
     address WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     IUniswapV2Router02 router;
-
+    // shareholder fields
     address[] shareholders;
     mapping (address => uint256) shareholderIndexes;
     mapping (address => uint256) shareholderClaims;
-
     mapping (address => Share) public shares;
-
+    // shares math and fields
     uint256 public totalShares;
     uint256 public totalDividends;
     uint256 public totalDistributed;
     uint256 public dividendsPerShare;
     uint256 public dividendsPerShareAccuracyFactor = 10 ** 36;
-
+    // distributes daily
     uint256 public minPeriod = 24 hours;
-    uint256 public minDistribution = 8 * (10 ** 14); // 800k Safemoon Minimum Distribution
-    
+    // 800k Safemoon Minimum Distribution
+    uint256 public minDistribution = 8 * (10 ** 14); 
+    // BNB Needed to Swap to Safemoon
     uint256 public swapToSafemoonThreshold = 1 * (10 ** 18);
-
+    // current index in shareholder array 
     uint256 currentIndex;
-
-    bool initialized;
-    modifier initialization() {
-        require(!initialized);
-        _;
-        initialized = true;
-    }
 
     modifier onlyToken() {
         require(msg.sender == _token); _;
@@ -707,9 +695,10 @@ contract DividendDistributor is IDividendDistributor {
         _token = msg.sender;
     }
 
-    function setDistributionCriteria(uint256 _minPeriod, uint256 _minDistribution) external override onlyToken {
+    function setDistributionCriteria(uint256 _minPeriod, uint256 _minDistribution, uint256 _bnbToSafemoonThreshold) external override onlyToken {
         minPeriod = _minPeriod;
         minDistribution = _minDistribution;
+        swapToSafemoonThreshold = _bnbToSafemoonThreshold;
     }
 
     function setShare(address shareholder, uint256 amount) external override onlyToken {
@@ -781,10 +770,11 @@ contract DividendDistributor is IDividendDistributor {
     
     function processManually() external override onlyToken {
         uint256 shareholderCount = shareholders.length;
-
+        
         if(shareholderCount == 0) { return; }
 
         uint256 iterations = 0;
+        currentIndex = 0;
 
         while(iterations < shareholderCount) {
             if(currentIndex >= shareholderCount){
@@ -818,6 +808,7 @@ contract DividendDistributor is IDividendDistributor {
     }
 
     function claimDividend() external {
+        require(shouldDistribute(msg.sender), 'Must wait 24 hours to claim dividend!');
         distributeDividend(msg.sender);
     }
 
@@ -1013,10 +1004,12 @@ contract SafeVault is IERC20, Context, Ownable {
         // make standard checks
         require(recipient != address(0), "BEP20: transfer to the zero address");
         require(amount > 0, "Transfer amount must be greater than zero");
+        // check if we have reached the transaction limit
+        require(amount <= _maxTxAmount || isTxLimitExempt[sender], "TX Limit Exceeded");
+        
         // if we're in swap perform a basic transfer
         if(inSwap){ return _basicTransfer(sender, recipient, amount); }
-        // check if we have reached the transaction limit
-        checkTxLimit(sender, amount);
+        
         uint256 amountReceived;
         // limit gas consumption by splitting up operations
         if(shouldSwapBack()) { 
@@ -1052,10 +1045,7 @@ contract SafeVault is IERC20, Context, Ownable {
         handleTransferBody(sender, recipient, amount);
         return true;
     }
-    /** Checks if the amount is greater than the tx limit if the sender is not limit exempt*/
-    function checkTxLimit(address sender, uint256 amount) internal view {
-        require(amount <= _maxTxAmount || isTxLimitExempt[sender], "TX Limit Exceeded");
-    }
+
     /** False if sender is Fee Exempt, True if not */
     function shouldTakeFee(address sender) internal view returns (bool) {
         return !isFeeExempt[sender];
@@ -1126,7 +1116,7 @@ contract SafeVault is IERC20, Context, Ownable {
             emit AutoLiquify(amountBNBLiquidity, amountToLiquify);
         }
     }
-    /** Transfers BNB to Safemoon Distributor and Marketing */
+    /** Transfers BNB to Safemoon Distributor and Marketing Wallet */
     function transferToDistributorAndMarketing(uint256 distributorBNB, uint256 marketingBNB) internal {
         (bool success,) = payable(address(distributor)).call{value: distributorBNB, gas: 30000}("");
         if (success) {
@@ -1157,7 +1147,7 @@ contract SafeVault is IERC20, Context, Ownable {
     }
     
     /**
-     * Buys Safemoon Vault with bnb in the contract, sending to target address
+     * Buys SafeVault with bnb in the contract, sending to target address
      */ 
     function buyTokens(uint256 amount, address to) internal swapping {
         address[] memory path = new address[](2);
@@ -1242,8 +1232,8 @@ contract SafeVault is IERC20, Context, Ownable {
         targetLiquidityDenominator = _denominator;
     }
 
-    function setDistributionCriteria(uint256 _minPeriod, uint256 _minDistribution) external onlyOwner {
-        distributor.setDistributionCriteria(_minPeriod, _minDistribution);
+    function setDistributionCriteria(uint256 _minPeriod, uint256 _minDistribution, uint256 _bnbToSafemoonThreshold) external onlyOwner {
+        distributor.setDistributionCriteria(_minPeriod, _minDistribution, _bnbToSafemoonThreshold);
     }
 
     function setDistributorGas(uint256 gas) external onlyOwner {
@@ -1296,7 +1286,7 @@ contract SafeVault is IERC20, Context, Ownable {
     }
     
     function getBNBQuantityInContract() public view returns(uint256){
-        return (address(this).balance);
+        return address(this).balance;
     }
     
     function getTotalFee(bool selling) public view returns (uint256) {
@@ -1310,6 +1300,10 @@ contract SafeVault is IERC20, Context, Ownable {
 
     function isOverLiquified(uint256 target, uint256 accuracy) public view returns (bool) {
         return accuracy.mul(balanceOf(pair).mul(2)).div(getCirculatingSupply()) > target;
+    }
+    
+    function getDistributorAddress() external view returns (address) {
+        return address(distributor);
     }
 
     event AutoLiquify(uint256 amountBNB, uint256 amountBOG);
