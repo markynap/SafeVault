@@ -1,6 +1,7 @@
 //SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
-/** Forked from SafeEarn V2 Dividend Distributor with performance adjustments */
+
+/** Forked from SafeEarn V2 Dividend Distributor with performance adjustments (credit woofydev) */
 interface IDividendDistributor {
     function setDistributionCriteria(uint256 _minPeriod, uint256 _minDistribution) external;
     function setShare(address shareholder, uint256 amount) external;
@@ -8,7 +9,6 @@ interface IDividendDistributor {
     function process(uint256 gas) external;
     function processManually() external;
 }
-
 
 library Address {
     /**
@@ -855,20 +855,21 @@ contract DividendDistributor is IDividendDistributor {
 }
 
 /** 
- * Contract: SafemoonVault 
+ * Contract: SafeVault 
  * 
- *  This contract is forked from SafeEarn with some small tweaks / improvements to gas
+ *  This contract is forked from SafeEarn (credit woofydev) with some small tweaks / improvements to gas
  *  This Contract Awards Safemoon Daily to holders, weighted by how much you hold
  *  Safemoon Burn Wallet Gains 2% of the Distribution (contributing to asynchronous burning)
  *  This is due to the fact that we sent 2% of the supply to Safemoon's Burn Wallet on Launch
  *  
- *  Buy Fees:  5%
- *  Sell Fees: 30%
+ *  Transfer Fee:  5%
+ *  Buy Fee:       5%
+ *  Sell Fee:     30%
  * 
  *  Fees Go Toward:
- *  20% Safemoon Distribution
- *  6% Buyback and burn
- *  3% Auto Liquidity
+ *  22% Safemoon Distribution
+ *  5% Buyback and burn
+ *  2% Auto Liquidity
  *  1% Marketing
  */
 contract SafeVault is IERC20, Context, Ownable {
@@ -876,11 +877,12 @@ contract SafeVault is IERC20, Context, Ownable {
     using SafeMath for uint256;
     using SafeMath for uint8;
     using Address for address;
+    
     // wrapped bnb address for swapping
     address public WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    
     // our burn wallet address - separate from Safemoon's
     address DEAD = 0x000000000000000000000000000000000000dEaD;
-    address ZERO = 0x0000000000000000000000000000000000000000;
     // token data
     string constant _name = "SafeVault";
     string constant _symbol = "VAULT";
@@ -896,27 +898,25 @@ contract SafeVault is IERC20, Context, Ownable {
     mapping (address => bool) isTxLimitExempt;
     mapping (address => bool) isDividendExempt;
     // fees
-    uint256 liquidityFee = 300;
-    uint256 buybackFee = 600;
-    uint256 reflectionFee = 2000;
-    uint256 marketingFee = 100;
-    uint256 totalFeeSells = 3000;
+    uint256 public liquidityFee = 200;
+    uint256 public buybackFee = 500;
+    uint256 public reflectionFee = 2200;
+    uint256 public marketingFee = 100;
     // total fees
+    uint256 totalFeeSells = 3000;
     uint256 totalFeeBuys = 500;
     uint256 feeDenominator = 10000;
     // receiving addresses
     address public autoLiquidityReceiver;
-    address public marketingFeeReceiver;
-    // target liquidity is 10%
-    uint256 targetLiquidity = 10;
+    // to be replaced with Gnosis V2 BSC MultiSignature Wallet
+    address public marketingFeeReceiver = 0xf78b41c83458eA2548770D49764529a3eAc8A303;
+    // target liquidity is 12%
+    uint256 targetLiquidity = 12;
     uint256 targetLiquidityDenominator = 100;
-    
+    // Pancakeswap V2 Router
     IUniswapV2Router02 public router;
     address public pair;
-    // when contract was launched
-    uint256 public launchedAt = 0;
-    uint256 public launchedAtTimestamp;
-    // buy back 
+    // buy back data
     bool public autoBuybackEnabled = false;
     uint256 autoBuybackAccumulator = 0;
     uint256 autoBuybackAmount = 1 * 10**18;
@@ -929,16 +929,18 @@ contract SafeVault is IERC20, Context, Ownable {
     // in charge of swapping
     bool public swapEnabled = true;
     uint256 public swapThreshold = _totalSupply.div(1250); // 0.08% or 800 Million to start
-    bool public canChangeSwapThreshold = true;
+    bool public canChangeSwapThreshold = false;
     uint256 public swapThresholdPercentOfCirculatingSupply = 1750;
     bool inSwap;
     modifier swapping() { inSwap = true; _; inSwap = false; }
-    // Marketing Wallet and MultiSignature Development Wallet
-    address public multisigwallet = 0x9A34349FD7b0266fc500DC98FEc1b13F2eABbb51;
     // Uniswap Router V2
     address private _dexRouter = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
     // false if we should disable auto liquidity pairing for any reason
     bool public shouldPairLiquidity = true;
+    // because transparency is important
+    uint256 public totalBNBMarketing = 0;
+    uint256 public totalBNBSafemoonReflections = 0;
+    
     // initialize some stuff
     constructor (
     ) {
@@ -947,21 +949,21 @@ contract SafeVault is IERC20, Context, Ownable {
         // Liquidity Pool Address for BNB -> Vault
         pair = IUniswapV2Factory(router.factory()).createPair(WBNB, address(this));
         _allowances[address(this)][address(router)] = _totalSupply;
+        // Wrapped BNB Address used for trading on PCS
         WBNB = router.WETH();
+        // our dividend Distributor
         distributor = new DividendDistributor(_dexRouter);
+        // send LP tokens to the burn wallet
+        autoLiquidityReceiver = DEAD;
         // exempt deployer from fees
         isFeeExempt[msg.sender] = true;
         // exempt deployer from TX limit
         isTxLimitExempt[msg.sender] = true;
-        isTxLimitExempt[multisigwallet] = true;
-        // exempt this contract, the LP, and OUR burn wallet from receiving dividends
+        isTxLimitExempt[marketingFeeReceiver] = true;
+        // exempt this contract, the LP, and OUR burn wallet from receiving Safemoon Rewards
         isDividendExempt[pair] = true;
         isDividendExempt[address(this)] = true;
         isDividendExempt[DEAD] = true;
-        // send LP tokens to the burn wallet
-        autoLiquidityReceiver = DEAD;
-        marketingFeeReceiver = multisigwallet;
-
         approve(_dexRouter, _totalSupply);
         approve(address(pair), _totalSupply);
         _balances[msg.sender] = _totalSupply;
@@ -973,13 +975,24 @@ contract SafeVault is IERC20, Context, Ownable {
     function totalSupply() external view override returns (uint256) { return _totalSupply; }
     function balanceOf(address account) public view override returns (uint256) { return _balances[account]; }
     function allowance(address holder, address spender) external view override returns (uint256) { return _allowances[holder][spender]; }
+    function name() public pure returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public pure returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public pure returns (uint8) {
+        return _decimals;
+    }
 
     function approve(address spender, uint256 amount) public override returns (bool) {
         _allowances[msg.sender][spender] = amount;
         emit Approval(msg.sender, spender, amount);
         return true;
     }
-
+    /** Approve Total Supply */
     function approveMax(address spender) external returns (bool) {
         return approve(spender, _totalSupply);
     }
@@ -1014,7 +1027,7 @@ contract SafeVault is IERC20, Context, Ownable {
             amountReceived = handleTransferBody(sender, recipient, amount);
         } else {
             amountReceived = handleTransferBody(sender, recipient, amount);
-            uint256 gasToUse = distributorGas > gasleft() ? gasleft().mul(2).div(3) : distributorGas;
+            uint256 gasToUse = distributorGas > gasleft() ? gasleft().mul(3).div(4) : distributorGas;
             try distributor.process(gasToUse) {} catch {}
         }
         
@@ -1030,25 +1043,13 @@ contract SafeVault is IERC20, Context, Ownable {
         _balances[recipient] = _balances[recipient].add(amountReceived);
 
         if(!isDividendExempt[sender]){ try distributor.setShare(sender, _balances[sender]) {} catch {} }
+        if(!isDividendExempt[recipient]){ try distributor.setShare(recipient, _balances[recipient]) {} catch {} }
 
         return amountReceived;
     }
     /** Basic Transfer with no swaps for BNB -> Vault or Vault -> BNB */
     function _basicTransfer(address sender, address recipient, uint256 amount) internal returns (bool) {
-        _balances[sender] = _balances[sender].sub(amount, "Insufficient Balance");
-        
-        if (shouldTakeFee(sender)) {
-            uint256 cAmount = amount.mul(5).div(10**2);
-            uint256 tAmount = amount.sub(cAmount);
-            
-            _balances[address(this)] = _balances[address(this)].add(cAmount);
-            _balances[recipient] = _balances[recipient].add(tAmount);
-        } else {
-            _balances[recipient] = _balances[recipient].add(amount);
-        }
-        
-        if(!isDividendExempt[sender]){ try distributor.setShare(sender, _balances[sender]) {} catch {} }
-        if(!isDividendExempt[recipient]){ try distributor.setShare(recipient, _balances[recipient]) {} catch {} }
+        handleTransferBody(sender, recipient, amount);
         return true;
     }
     /** Checks if the amount is greater than the tx limit if the sender is not limit exempt*/
@@ -1102,23 +1103,15 @@ contract SafeVault is IERC20, Context, Ownable {
         ) {} catch{}
         // how much BNB did we swap?
         uint256 amountBNB = address(this).balance.sub(balanceBefore);
-        // how much of these are going to Reflections + Marketing?
+        
+        // total amount of BNB to allocate
         uint256 totalBNBFee = totalFeeSells.sub(dynamicLiquidityFee.div(2));
-
+        // how much bnb is sent to liquidity, reflections, and marketing
         uint256 amountBNBLiquidity = amountBNB.mul(dynamicLiquidityFee).div(totalBNBFee).div(2);
         uint256 amountBNBReflection = amountBNB.mul(reflectionFee).div(totalBNBFee);
         uint256 amountBNBMarketing = amountBNB.mul(marketingFee).div(totalBNBFee);
-        // deposit BNB for reflections
-        
-        (bool success,) = payable(address(distributor)).call{value: amountBNBReflection, gas: 30000}("");
-        if (success) {
-            try distributor.deposit() {} catch {}
-        }
-        
-        if (allowTransferToMarketing) {
-            (bool successful,) = payable(marketingFeeReceiver).call{value: amountBNBMarketing, gas: 30000}("");
-            require(successful, "Unable to send bnb to marketing");
-        }
+        // deposit BNB for reflections and marketing
+        transferToDistributorAndMarketing(amountBNBReflection, amountBNBMarketing);
         
         // add liquidity if we need to
         if(amountToLiquify > 0 && shouldPairLiquidity ){
@@ -1131,6 +1124,20 @@ contract SafeVault is IERC20, Context, Ownable {
                 block.timestamp
         ) {} catch {}
             emit AutoLiquify(amountBNBLiquidity, amountToLiquify);
+        }
+    }
+    /** Transfers BNB to Safemoon Distributor and Marketing */
+    function transferToDistributorAndMarketing(uint256 distributorBNB, uint256 marketingBNB) internal {
+        (bool success,) = payable(address(distributor)).call{value: distributorBNB, gas: 30000}("");
+        if (success) {
+            try distributor.deposit() {totalBNBSafemoonReflections = totalBNBSafemoonReflections.add(marketingBNB);} catch {}
+        }
+        
+        if (allowTransferToMarketing) {
+            (bool successful,) = payable(marketingFeeReceiver).call{value: marketingBNB, gas: 30000}("");
+            if (successful) {
+                totalBNBMarketing = totalBNBMarketing.add(marketingBNB);
+            }
         }
     }
 
@@ -1167,10 +1174,6 @@ contract SafeVault is IERC20, Context, Ownable {
             swapThreshold = getCirculatingSupply().div(swapThresholdPercentOfCirculatingSupply);
         }
     }
-    /** Whether or not this contract has been launched */
-    function launched() internal view returns (bool) {
-        return launchedAt != 0;
-    }
     
     /** 0 = process manually | 1 = process with standard gas | Above 1 = process with custom gas limit */
     function manuallyProcessDividends(uint256 distributorGasFee) public {
@@ -1190,7 +1193,7 @@ contract SafeVault is IERC20, Context, Ownable {
         marketingFee = _marketingFee;
         totalFeeSells = _liquidityFee.add(_buybackFee).add(_reflectionFee).add(_marketingFee);
         feeDenominator = _feeDenominator;
-        require(totalFeeSells < feeDenominator/3);
+        require(totalFeeSells < feeDenominator/2);
     }
     
     function setIsFeeExempt(address holder, bool exempt) external onlyOwner {
@@ -1200,7 +1203,19 @@ contract SafeVault is IERC20, Context, Ownable {
     function setIsTxLimitExempt(address holder, bool exempt) external onlyOwner {
         isTxLimitExempt[holder] = exempt;
     }
-
+    
+    function getIsFeeExempt(address holder) external view returns (bool) {
+        return isFeeExempt[holder];
+    }
+    
+    function getIsDividendExempt(address holder) external view returns (bool) {
+        return isDividendExempt[holder];
+    }
+    
+    function getIsTxLimitExempt(address holder) external view returns (bool) {
+        return isTxLimitExempt[holder];
+    }
+    
     function setFeeReceivers(address _autoLiquidityReceiver, address _marketingFeeReceiver) external onlyOwner {
         autoLiquidityReceiver = _autoLiquidityReceiver;
         marketingFeeReceiver = _marketingFeeReceiver;
@@ -1232,14 +1247,8 @@ contract SafeVault is IERC20, Context, Ownable {
     }
 
     function setDistributorGas(uint256 gas) external onlyOwner {
-        require(gas < 750000);
+        require(gas < 1000000);
         distributorGas = gas;
-    }
-    
-    function launch() public onlyOwner {
-        require(launchedAt == 0, "Already launched boi");
-        launchedAt = block.number;
-        launchedAtTimestamp = block.timestamp;
     }
 
     function setTxLimit(uint256 amount) external onlyOwner {
@@ -1282,15 +1291,7 @@ contract SafeVault is IERC20, Context, Ownable {
         autoBuybackEnabled = enable;
     }
     
-    function setMultisigWallet(address nWallet) public onlyOwner {
-        multisigwallet = nWallet;
-    }
-    
-    function setMarketingReceivingAddress(address nAddress) public onlyOwner {
-        marketingFeeReceiver = nAddress;
-    }
-    
-    function setSafemoonAddress(address nSFM) public onlyOwner {
+    function setSafemoonContractAddress(address nSFM) public onlyOwner {
         distributor.setSafemoonAddress(nSFM);
     }
     
@@ -1299,13 +1300,12 @@ contract SafeVault is IERC20, Context, Ownable {
     }
     
     function getTotalFee(bool selling) public view returns (uint256) {
-        if(launchedAt + 1 >= block.number){ return feeDenominator.sub(1); }
         if(selling){ return totalFeeSells; }
         return totalFeeBuys;
     }
-    /** Returns the Circulating Supply of Vault ( supply not owned by Burn Wallet or Zero Address )*/
+    /** Returns the Circulating Supply of Vault ( supply not owned by Burn Wallet ) */
     function getCirculatingSupply() public view returns (uint256) {
-        return _totalSupply.sub(balanceOf(DEAD)).sub(balanceOf(ZERO));
+        return _totalSupply.sub(balanceOf(DEAD));
     }
 
     function isOverLiquified(uint256 target, uint256 accuracy) public view returns (bool) {
